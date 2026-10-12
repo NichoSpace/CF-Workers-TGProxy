@@ -23,7 +23,6 @@ Cloudflare Workers 的 Telegram Web/MTProto WebSocket 代理中继（KWS Lanes�
 
 ## 代码主路径
 
-```mermaid
 flowchart LR
   subgraph 客户端与普通访问
     TG["Telegram 客户端 (Desktop / Android)"]
