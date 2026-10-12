@@ -25,21 +25,24 @@ Cloudflare Workers 的 Telegram Web/MTProto WebSocket 代理中继（KWS Lanes�
 
 ```mermaid
 flowchart LR
-  subgraph 客户端与普通访问
+  subgraph Client ["客户端与访问端"]
     TG["Telegram 客户端 (Desktop / Android)"]
     Browser["普通用户浏览器"]
   end
-  subgraph Cloudflare Worker 边缘路由
-    Route{"路由与请求判定"}
-    Dash["落地看板 HTML (/api/stats 轮询)"]
+
+  subgraph Worker ["Cloudflare Worker 边缘路由"]
+    Dash["落地看板 HTML (含 /api/stats 轮询)"]
     P["Worker 隧道页面 (nonce CSP)"]
     WS["/api/v1/ws (Lanes 中继)"]
   end
-  Browser -->|"GET / (无 bridge)"| Dash
-  TG -->|"GET /?bridge=... (签名校验)"| P
-  P -->|"建立 session 与 lanes"| WS
-  WS -->|"解 obfuscation (AES-CTR) -> mkHead 重签"| KWS["Telegram Web K / KWS 官方通道"]
 
+  Browser -->|"GET / (无 bridge)"| Dash
+  TG -->|"GET /?bridge=... (签名验证)"| P
+  P -->|"建立 session 与 lanes"| WS
+  WS -->|"解 obfuscation 并 mkHead 重签"| KWS["Telegram Web K / KWS 官方通道"]
+```
+
+```text
 1. 普通浏览器访问：
   GET / (无签名) → 动态下发服务看板（展示 tg://webproxy 导入链接 + 3秒轮询 /api/stats）
 
@@ -49,7 +52,7 @@ flowchart LR
     → 拿到 session token + X-Carrier-Mode: websocket-lanes
     → 按流开 lane：/api/v1/ws + 子协议 tproxy-lane-v1.<token>.<sid>
     → Worker: 解 obfuscation → 重新封头 → 拨 KWS → 中继（同步累加流量与连接指标）
-已在文档最底部增加了友情链接，完整内容如下：
+```
 
 ```markdown
 # CF-Workers-TGProxy
