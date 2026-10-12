@@ -3,6 +3,33 @@ export default { fetch: (req, env) => route(req, env) };
 const txt = new TextEncoder(), dec = new TextDecoder(), nil = new Uint8Array(0), badHead = new Set(['HEAD', 'POST', 'GET ', 'OPTI']);
 const CRYPTO = globalThis.crypto, macKeys = new Map(), leases = new Map();
 const reply = (body = null, status = 404) => new Response(body, { status });
+
+// ======================== 全局监控埋点统计 ========================
+const STATS = {
+  startTime: Date.now(),
+  totalSessions: 0,
+  activeConnections: 0,
+  totalTrafficBytes: 0,
+};
+
+function formatTraffic(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+}
+
+function formatDuration(ms) {
+  const sec = Math.floor(ms / 1000);
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (d > 0) return `${d}天 ${h}小时`;
+  if (h > 0) return `${h}小时 ${m}分钟`;
+  return `${m}分钟`;
+}
+// =================================================================
+
 function u8(v) { if (v instanceof Uint8Array && v.constructor === Uint8Array) return v; if (v instanceof ArrayBuffer) return new Uint8Array(v); if (ArrayBuffer.isView(v)) return new Uint8Array(v.buffer, v.byteOffset, v.byteLength); throw TypeError(); }
 const dup = v => u8(v).slice();
 function cat(...args) { const parts = args.filter(v => v?.byteLength).map(u8); const out = new Uint8Array(parts.reduce((total, part) => total + part.byteLength, 0)); let o = 0; for (const part of parts) { out.set(part, o); o += part.byteLength; } return out; }
@@ -77,13 +104,34 @@ const mkSession = ({ secret, sid, onClose, lease }) => { let sock = null, closed
   const onData = (v) => { if (closed) return; if (lease?.deleted) { return close(1000); } if (typeof v === 'string') throw Error(); const b = v instanceof Uint8Array ? v : new Uint8Array(v); if (!b.byteLength || b.byteLength > 2 * 1024 * 1024) { throw Error(); } for (const frame of frames(b)) { if (closed) return; const delta = check(frame); if (frame.sid !== sid) throw Error(); if (!cur && frame.type !== 1) throw Error(); if (frame.type !== 1 && cur?.closed) continue; if (frame.type === 1) open(); else if (frame.type === 2) write(frame.payload); else if (frame.type === 4) grant(delta); else if (frame.type === 3) end(false); else throw Error(); } };
   const send = (type, data = nil) => { const out = enc(type, sid, data); const st = type === 2 || type === 4 ? cur : null; tx = tx.then(() => { if (closed) throw Error(); if ((type === 2 || type === 4) && (!st || st.closed)) return; sock.send(out); }); return tx; };
   const open = () => { if (closed) return; if (cur) throw Error(); const st = { in: 4 * 1024 * 1024, out: 4 * 1024 * 1024, wake: null, closed: false, proxy: null, pItems: 0, }; st.proxy = mkStream({ secret, emit: b => emitDn(st, b), onClose: () => { if (!closed && !st.closed) end(true); }, }); cur = st; };
-  const write = (data) => { if (closed || cur?.closed) return; const st = cur; if (!st || st.closed) throw Error(); const n = data.byteLength; if (n > st.in) throw Error(); if (st.pItems >= 16384) { throw Error(); } st.in -= n; st.pItems++; st.proxy.push(data).then(accepted => { freeUp(st); if (closed || st.closed || accepted === false) return; st.in += n; const delta = new Uint8Array(4); new DataView(delta.buffer).setUint32(0, n); send(4, delta).catch(() => close()); }, () => { freeUp(st); if (!closed && !st.closed) st.proxy.close(); }).catch(() => close()); };
+  const write = (data) => {
+    if (closed || cur?.closed) return;
+    const st = cur;
+    if (!st || st.closed) throw Error();
+    const n = data.byteLength;
+    if (n > st.in) throw Error();
+    if (st.pItems >= 16384) { throw Error(); }
+    STATS.totalTrafficBytes += n; // 记录上行加密流量
+    st.in -= n; st.pItems++;
+    st.proxy.push(data).then(accepted => { freeUp(st); if (closed || st.closed || accepted === false) return; st.in += n; const delta = new Uint8Array(4); new DataView(delta.buffer).setUint32(0, n); send(4, delta).catch(() => close()); }, () => { freeUp(st); if (!closed && !st.closed) st.proxy.close(); }).catch(() => close());
+  };
   const freeUp = (st) => { if (st.closed) return; st.pItems--; };
-  const emitDn = async (st, b) => { for (let o = 0; o < b.byteLength; ) { while (!closed && !st.closed && st.out === 0) { await new Promise(ok => { st.wake = ok; }); } if (closed || st.closed) throw Error(); const n = Math.min(64 * 1024, b.byteLength - o, st.out); st.out -= n; await send(2, b.subarray(o, o + n)); o += n; } };
+  const emitDn = async (st, b) => {
+    for (let o = 0; o < b.byteLength; ) {
+      while (!closed && !st.closed && st.out === 0) { await new Promise(ok => { st.wake = ok; }); }
+      if (closed || st.closed) throw Error();
+      const n = Math.min(64 * 1024, b.byteLength - o, st.out);
+      st.out -= n;
+      STATS.totalTrafficBytes += n; // 记录下行加密流量
+      await send(2, b.subarray(o, o + n));
+      o += n;
+    }
+  };
   const grant = (n) => { if (closed || cur?.closed) return; const st = cur; if (!st || st.closed) throw Error(); st.out = Math.min(0xffffffff, st.out + n); wake(st); };
   const stop = (st) => { st.closed = true; st.pItems = 0; wake(st); st.proxy.close(); };
   const end = (notify) => { if (closed || cur?.closed) return; const st = cur; if (!st) throw Error(); stop(st); if (notify) send(3).then(() => close(), () => close()); else close(); };
   const close = (code = 1000, reason = '') => { if (closed) return; closed = true; if (cur) stop(cur); cur = null; try { sock?.close(code, reason); } catch {} onClose?.(); onClose = null; }; return { attach, close }; };
+
 function mkPage(host, boot) { const nonce = b64(rand(18));
   const body = `<script nonce="__NONCE__">
 (()=>{'use strict'; const origin=__ORIGIN__,boot=__BOOTSTRAP__;
@@ -112,19 +160,357 @@ if(!init&&aNonce&&android&&typeof android.postMessage==='function'){ const aPort
 </script>`.replaceAll('__NONCE__', nonce).replace('__ORIGIN__', JSON.stringify(`https://${host}`))
     .replace('__BOOTSTRAP__', JSON.stringify(String(boot)));
   const csp = [ "default-src 'none'", "base-uri 'none'", "child-src 'none'", `connect-src 'self' wss://${host}`, "font-src 'none'", "form-action 'none'", 'frame-ancestors http://127.0.0.1:*', "frame-src 'none'", "img-src 'none'", "manifest-src 'none'", "media-src 'none'", "object-src 'none'", `script-src 'nonce-${nonce}'`, "style-src 'none'", "worker-src 'none'", 'sandbox allow-same-origin allow-scripts', ].join('; '); return { body, csp }; }
+
+// ======================== 前端监控与一键导入页面 ========================
+function mkDashboard(host, secret, botName = 'eoops_bot') {
+  const proxyUrl = `tg://webproxy?server=${host}&secret=${secret}`;
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Telegram 官方代理服务中心</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background-color: #f0f2f5;
+    color: #303133;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    padding: 24px 16px;
+  }
+  .container {
+    width: 100%;
+    max-width: 540px;
+    background-color: #ffffff;
+    border: 1px solid #dcdfe6;
+    border-radius: 6px;
+    box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.05);
+    overflow: hidden;
+  }
+  .header {
+    padding: 24px 28px 16px;
+    border-bottom: 1px solid #ebeef5;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .title { font-size: 18px; font-weight: 600; color: #303133; }
+  .badge-success {
+    background-color: #f0f9eb;
+    color: #67c23a;
+    border: 1px solid #e1f3d8;
+    font-size: 12px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-weight: 500;
+  }
+  .content { padding: 24px 28px; }
+  .card-section { margin-bottom: 22px; }
+  .section-label { font-size: 13px; color: #909399; margin-bottom: 8px; font-weight: 500; }
+  .proxy-card { background: #fdfdfd; border: 1px solid #ebeef5; border-radius: 4px; padding: 14px 16px; }
+  .proxy-url-text {
+    font-family: Consolas, Monaco, monospace;
+    font-size: 13px;
+    color: #409eff;
+    background: #ecf5ff;
+    padding: 8px 10px;
+    border-radius: 4px;
+    border: 1px solid #d9ecff;
+    word-break: break-all;
+    user-select: all;
+    margin-bottom: 10px;
+  }
+  .proxy-details { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 13px; margin-bottom: 12px; }
+  .detail-item { display: flex; flex-direction: column; }
+  .detail-label { color: #909399; font-size: 11px; margin-bottom: 2px; }
+  .detail-value { font-family: Consolas, Monaco, monospace; color: #303133; font-weight: 500; word-break: break-all; }
+  .btn-group { display: flex; gap: 8px; margin-top: 8px; }
+  .btn {
+    padding: 8px 16px;
+    font-size: 13px;
+    border-radius: 4px;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: all 0.2s;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 500;
+  }
+  .btn-primary { background-color: #409eff; color: #ffffff; border-color: #409eff; }
+  .btn-primary:hover { background-color: #66b1ff; border-color: #66b1ff; }
+  .btn-default { background-color: #ffffff; color: #606266; border-color: #dcdfe6; }
+  .btn-default:hover { color: #409eff; border-color: #c6e2ff; background-color: #ecf5ff; }
+  .btn-success { background-color: #67c23a; color: #ffffff; border-color: #67c23a; }
+  .btn-success:hover { background-color: #85ce61; border-color: #85ce61; }
+  .metrics-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 8px; }
+  .metric-card { background: #fafafa; border: 1px solid #ebeef5; border-radius: 4px; padding: 12px; text-align: center; }
+  .metric-title { font-size: 12px; color: #909399; margin-bottom: 4px; }
+  .metric-value { font-family: Consolas, Monaco, monospace; font-size: 17px; font-weight: 600; color: #303133; }
+  .metric-unit { font-size: 12px; color: #909399; font-weight: normal; }
+  .metric-sub { font-size: 11px; color: #c0c4cc; margin-top: 2px; }
+  .group-box { background: #fdfdfd; border: 1px solid #ebeef5; border-radius: 4px; padding: 16px; }
+  .group-text { font-size: 13px; color: #606266; line-height: 1.5; margin-bottom: 12px; }
+  .toast {
+    position: fixed; top: 24px; left: 50%; transform: translateX(-50%);
+    background: #303133; color: #ffffff; padding: 8px 16px; border-radius: 4px;
+    font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); display: none; z-index: 1000;
+  }
+  .toast.show { display: block; animation: fadeInOut 2s ease forwards; }
+  @keyframes fadeInOut {
+    0% { opacity: 0; transform: translate(-50%, -10px); }
+    15% { opacity: 1; transform: translate(-50%, 0); }
+    85% { opacity: 1; transform: translate(-50%, 0); }
+    100% { opacity: 0; transform: translate(-50%, -10px); }
+  }
+</style>
+</head>
+<body>
+
+<div id="toast" class="toast">复制成功</div>
+
+<div class="container">
+  <div class="header">
+    <div class="title">Telegram 代理服务中心</div>
+    <div class="badge-success">● 服务就绪 (Online)</div>
+  </div>
+  
+  <div class="content">
+    <div class="card-section">
+      <div class="section-label">1. 推荐方式：Telegram WEB 代理 (官方全新通道，抗封锁)</div>
+      <div class="proxy-card">
+        <div class="proxy-url-text">${proxyUrl}</div>
+        <div class="proxy-details">
+          <div class="detail-item">
+            <span class="detail-label">服务器域名</span>
+            <span class="detail-value">${host}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">传输协议</span>
+            <span class="detail-value">HTTPS / WebSocket</span>
+          </div>
+          <div class="detail-item" style="grid-column: span 2;">
+            <span class="detail-label">专属密钥</span>
+            <span class="detail-value">${secret}</span>
+          </div>
+        </div>
+        <div class="btn-group">
+          <a href="${proxyUrl}" class="btn btn-primary">一键导入连接</a>
+          <button class="btn btn-default" onclick="copyText('${proxyUrl}', 'WEB 完整链接已复制')">复制完整连接</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card-section">
+      <div class="section-label">2. 节点负载与实时监控 (Prometheus 实时采集)</div>
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <div class="metric-title">当前在线人数</div>
+          <div class="metric-value" id="val-online" style="color: #67c23a;">0 <span class="metric-unit">人</span></div>
+          <div class="metric-sub">实时并发连接</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-title">累计加密吞吐</div>
+          <div class="metric-value" id="val-traffic" style="color: #409eff;">0.00 B</div>
+          <div class="metric-sub">双向总传输量</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-title">累计建立会话</div>
+          <div class="metric-value" id="val-sessions">0 <span class="metric-unit">次</span></div>
+          <div class="metric-sub">总接入 Sessions</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-title">持续稳定运行</div>
+          <div class="metric-value" id="val-uptime" style="font-size: 15px;">计算中...</div>
+          <div class="metric-sub">当前实例连续运行时间</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-title">最近一次启动</div>
+          <div class="metric-value" id="val-machine-boot" style="font-size: 14px;">计算中...</div>
+          <div class="metric-sub">边缘服务启动时间</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-title">服务累计运行时长</div>
+          <div class="metric-value" id="val-machine-uptime" style="font-size: 15px;">计算中...</div>
+          <div class="metric-sub">实例健康活跃时间</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card-section" style="margin-bottom: 0;">
+      <div class="section-label">3. 交流机器人</div>
+      <div class="group-box">
+        <div class="group-text">欢迎联系TG私聊机器人 <b>@${botName}</b>，获取实时节点状态、测速通知与最新专属配置！</div>
+        <div class="btn-group" style="margin-top: 0;">
+          <a href="https://t.me/${botName}" target="_blank" class="btn btn-success">立即联系TG机器人 (@${botName})</a>
+          <button class="btn btn-default" onclick="copyText('https://t.me/${botName}', '群组链接已复制')">复制机器人链接</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function copyText(text, msg) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function() { showToast(msg || '复制成功'); }).catch(function() { fallbackCopy(text, msg); });
+  } else { fallbackCopy(text, msg); }
+}
+function fallbackCopy(text, msg) {
+  var input = document.createElement('input');
+  input.setAttribute('value', text);
+  document.body.appendChild(input);
+  input.select();
+  document.execCommand('copy');
+  document.body.removeChild(input);
+  showToast(msg || '复制成功');
+}
+function showToast(msg) {
+  var toast = document.getElementById('toast');
+  toast.textContent = msg;
+  toast.classList.add('show');
+  setTimeout(function() { toast.classList.remove('show'); }, 2000);
+}
+function updateMetrics() {
+  fetch('/api/stats')
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      var onlineEl = document.getElementById('val-online');
+      var trafficEl = document.getElementById('val-traffic');
+      var sessEl = document.getElementById('val-sessions');
+      var uptimeEl = document.getElementById('val-uptime');
+      var machineBootEl = document.getElementById('val-machine-boot');
+      var machineUptimeEl = document.getElementById('val-machine-uptime');
+      if (onlineEl) onlineEl.innerHTML = data.active_connections + ' <span class="metric-unit">人</span>';
+      if (trafficEl) trafficEl.textContent = data.total_traffic;
+      if (sessEl) sessEl.innerHTML = data.total_sessions + ' <span class="metric-unit">次</span>';
+      if (uptimeEl) uptimeEl.textContent = data.uptime;
+      if (machineBootEl) machineBootEl.textContent = data.machine_boot_time;
+      if (machineUptimeEl) machineUptimeEl.textContent = data.machine_uptime;
+    }).catch(function() {});
+}
+updateMetrics();
+setInterval(updateMetrics, 3000);
+</script>
+</body>
+</html>`;
+}
+
+// ======================== 核心路由 ========================
 const route = async (req, env) => {
   const url = new URL(req.url), { pathname: path, origin } = url, { method, headers } = req; let cfg;
   try { cfg = mkCfg(env); } catch { return ['/', '/health', '/api/v1/session', '/api/v1/ws'].includes(path) ? reply(null, 500) : reply(); }
-  if (path === '/' && (method === 'GET' || method === 'HEAD')) { let host = null; if (method === 'GET') { try { host = await bridge(url, cfg.secret); } catch {} } if (host) { const boot = await mkBoot(cfg.boot); const page = mkPage(host, boot); return new Response(page.body, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': page.csp, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', 'Permissions-Policy': [ 'accelerometer=()', 'autoplay=()', 'camera=()', 'clipboard-read=()', 'clipboard-write=()', 'display-capture=()', 'encrypted-media=()', 'fullscreen=()', 'geolocation=()', 'gyroscope=()', 'hid=()', 'idle-detection=()', 'magnetometer=()', 'microphone=()', 'midi=()', 'payment=()', 'picture-in-picture=()', 'publickey-credentials-create=()', 'publickey-credentials-get=()', 'screen-wake-lock=()', 'serial=()', 'usb=()', 'web-share=()', 'xr-spatial-tracking=()', ].join(', '), }, }); } return new Response(method === 'HEAD' ? null : '<!doctype html><meta charset="utf-8"><title>Connection</title>', { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' }, }); }
+
+  // 1. 新增：实时统计 API 接口
+  if (path === '/api/stats' && method === 'GET') {
+    const uptimeStr = formatDuration(Date.now() - STATS.startTime);
+    const bootDate = new Date(STATS.startTime);
+    const bootStr = `${bootDate.getFullYear()}-${String(bootDate.getMonth()+1).padStart(2,'0')}-${String(bootDate.getDate()).padStart(2,'0')} ${String(bootDate.getHours()).padStart(2,'0')}:${String(bootDate.getMinutes()).padStart(2,'0')}`;
+    return new Response(JSON.stringify({
+      active_connections: STATS.activeConnections,
+      total_sessions: STATS.totalSessions,
+      total_traffic: formatTraffic(STATS.totalTrafficBytes),
+      uptime: uptimeStr,
+      machine_boot_time: env.MACHINE_BOOT_TIME || bootStr,
+      machine_uptime: env.MACHINE_UPTIME || uptimeStr,
+    }), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-store',
+      },
+    });
+  }
+
+  // 2. 根路径：区分 Telegram Client 桥接 vs 普通浏览器访问
+  if (path === '/' && (method === 'GET' || method === 'HEAD')) {
+    let host = null;
+    if (method === 'GET') {
+      try { host = await bridge(url, cfg.secret); } catch {}
+    }
+    // 如果是 Telegram 客户端带来的带有签名的桥接请求，返回内置代理隧道脚本
+    if (host) {
+      const boot = await mkBoot(cfg.boot);
+      const page = mkPage(host, boot);
+      return new Response(page.body, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Content-Security-Policy': page.csp,
+          'Cache-Control': 'no-store',
+          'Referrer-Policy': 'no-referrer',
+          'X-Content-Type-Options': 'nosniff',
+        },
+      });
+    }
+    // 如果是普通浏览器直接访问根路径，返回高颜值导入与监控看板
+    if (method === 'HEAD') return new Response(null, { status: 200 });
+    const botName = env.TG_BOT || 'eoops_bot';
+    const dashboardHtml = mkDashboard(url.hostname, cfg.secret, botName);
+    return new Response(dashboardHtml, {
+      status: 200,
+      headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    });
+  }
+
   if (path === '/health') { return new Response('{"ok":true}', { headers: { 'content-type': 'application/json; charset=utf-8' }, }); }
-  if (path === '/api/v1/session') { const auth = bearer(headers.get('Authorization')); if (method === 'DELETE') { if (!auth || !(await verify(auth, cfg.boot, 'session'))) { return reply(); } let lease = leases.get(auth); if (!lease) leases.set(auth, lease = mkLease(auth)); lease.deleted = true; return reply(null, 204); } if (method !== 'POST' || !auth || !binary(req)) { return reply(); } if (!(await authBoot(auth, cfg.boot))) { return reply(); } try { const body = new Uint8Array(await req.arrayBuffer()); hello(body); const token = await mkSess(cfg.boot); return new Response(enc(0x11, 0), { status: 200, headers: { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store', 'X-Session-Token': token, 'X-Carrier-Mode': 'websocket-lanes', }, }); } catch { return reply(); } }
+
+  // 3. 会话创建与销毁（埋点：totalSessions）
+  if (path === '/api/v1/session') {
+    const auth = bearer(headers.get('Authorization'));
+    if (method === 'DELETE') {
+      if (!auth || !(await verify(auth, cfg.boot, 'session'))) { return reply(); }
+      let lease = leases.get(auth);
+      if (!lease) leases.set(auth, lease = mkLease(auth));
+      lease.deleted = true;
+      return reply(null, 204);
+    }
+    if (method !== 'POST' || !auth || !binary(req)) { return reply(); }
+    if (!(await authBoot(auth, cfg.boot))) { return reply(); }
+    try {
+      const body = new Uint8Array(await req.arrayBuffer());
+      hello(body);
+      const token = await mkSess(cfg.boot);
+      STATS.totalSessions++; // 记录累计会话数 +1
+      return new Response(enc(0x11, 0), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Cache-Control': 'no-store',
+          'X-Session-Token': token,
+          'X-Carrier-Mode': 'websocket-lanes',
+        },
+      });
+    } catch { return reply(); }
+  }
+
+  // 4. WebSocket 数据管道（埋点：activeConnections）
   if (path !== '/api/v1/ws' || method !== 'GET' || headers.get('Upgrade')?.toLowerCase() !== 'websocket' || (headers.has('Origin') && headers.get('Origin') !== origin)) { return reply(); }
   const offers = protos(req); const proto = offers.length === 1 ? offers[0] : null;
   const parts = proto?.split('.') ?? [], [kind, token = '', id] = parts, sid = Number(id);
   if (parts.length !== 3 || kind !== 'tproxy-lane-v1' || !/^[1-9][0-9]{0,7}$/.test(id) || sid > 0xffffff || !(await verify(token, cfg.boot, 'session'))) { return reply(); } const now = Date.now();
   for (const [key, v] of leases) if (v.expires <= now && !v.active.size) leases.delete(key); let lease = leases.get(token);
   if (!lease) { if (leases.size >= 4096) return reply(null, 503); leases.set(token, lease = mkLease(token)); }
-  if (lease.deleted || lease.used.has(sid) || lease.active.size >= 128 || lease.used.size >= 4096) { return reply(null, 409); } lease.used.add(sid); lease.active.add(sid);
-  const sess = mkSession({ secret: cfg.key, sid, lease, onClose: () => lease.active.delete(sid), }); const { 0: client, 1: server } = new WebSocketPair();
+  if (lease.deleted || lease.used.has(sid) || lease.active.size >= 128 || lease.used.size >= 4096) { return reply(null, 409); }
+  lease.used.add(sid); lease.active.add(sid);
+
+  STATS.activeConnections++; // 在线并发连接数 +1
+  const sess = mkSession({
+    secret: cfg.key,
+    sid,
+    lease,
+    onClose: () => {
+      STATS.activeConnections = Math.max(0, STATS.activeConnections - 1); // 断开连接数 -1
+      lease.active.delete(sid);
+    },
+  });
+  const { 0: client, 1: server } = new WebSocketPair();
   try { sess.attach(server); } catch { sess.close(); return reply(null, 409); }
-  return new Response(null, { status: 101, webSocket: client, headers: { 'Sec-WebSocket-Protocol': proto, 'Sec-WebSocket-Extensions': '', }, }); };
+  return new Response(null, { status: 101, webSocket: client, headers: { 'Sec-WebSocket-Protocol': proto, 'Sec-WebSocket-Extensions': '', }, });
+};
