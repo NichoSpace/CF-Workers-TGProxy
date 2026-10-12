@@ -23,23 +23,23 @@ Cloudflare Workers 的 Telegram Web/MTProto WebSocket 代理中继（KWS Lanes�
 
 ## 代码主路径
 
+```mermaid
 flowchart LR
   subgraph 客户端与普通访问
     TG["Telegram 客户端 (Desktop / Android)"]
     Browser["普通用户浏览器"]
   end
-
   subgraph Cloudflare Worker 边缘路由
     Route{"路由与请求判定"}
     Dash["落地看板 HTML (/api/stats 轮询)"]
     P["Worker 隧道页面 (nonce CSP)"]
     WS["/api/v1/ws (Lanes 中继)"]
   end
-
   Browser -->|"GET / (无 bridge)"| Dash
   TG -->|"GET /?bridge=... (签名校验)"| P
   P -->|"建立 session 与 lanes"| WS
   WS -->|"解 obfuscation (AES-CTR) -> mkHead 重签"| KWS["Telegram Web K / KWS 官方通道"]
+
 1. 普通浏览器访问：
   GET / (无签名) → 动态下发服务看板（展示 tg://webproxy 导入链接 + 3秒轮询 /api/stats）
 
