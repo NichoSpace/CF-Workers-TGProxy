@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "maple-notes",
+  "main": "dist/worker.js",
+  "compatibility_date": "2026-10-15",
+  "workers_dev": true,
+  "preview_urls": false,
+  "routes": [
+    { "pattern": "maple-notes.echobeacon.dpdns.org", "custom_domain": true }
+  ],
+  "observability": { "enabled": true }
+}
