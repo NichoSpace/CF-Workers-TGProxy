@@ -23,6 +23,10 @@
 
 `SECRET` 和 `BOOT` 继续保存在 Cloudflare 的运行时 Secrets 中；仓库和工作流不需要这些值，也不会自动轮换它们。现有自定义域名在 `wrangler.jsonc` 中保留。连接后的源码以 Git 仓库为准，避免在在线编辑器中单独修改导致下次部署覆盖。
 
+## 手动触发自动更新
+
+打开仓库 Actions → Sync upstream safely → Run workflow，保持分支 main 后运行。若显示 No upstream changes，表示已是当前上游版本；有更新时，通过检查后会自动提交。发布结果请在 Cloudflare 的部署记录中确认。
+
 ## 本地操作
 
 ```sh
