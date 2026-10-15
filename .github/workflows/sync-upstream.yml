@@ -1,0 +1,45 @@
+name: Sync upstream safely
+on:
+  schedule:
+    - cron: '17 21 * * *' # Every day at 05:17 Asia/Shanghai (best effort).
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+jobs:
+  sync:
+    if: github.repository == 'NichoSpace/CF-Workers-TGProxy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Fetch only upstream source, README and license
+        run: npm run sync:upstream
+      - name: Apply private patch, test and check Worker bundle
+        run: |
+          npm run verify
+          npm run check:bundle
+      - name: Commit tested upstream changes
+        shell: bash
+        run: |
+          git add -- telegram_webproxy.js README.md LICENSE .upstream-revision
+          if git diff --cached --quiet; then
+            echo 'No upstream changes.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          revision=$(cat .upstream-revision)
+          git commit -m "chore: sync upstream ${revision:0:12}"
+          git push origin HEAD:main
+          echo "Synced and verified upstream $revision. Cloudflare Builds will deploy this commit." >> "$GITHUB_STEP_SUMMARY"
