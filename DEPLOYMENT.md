@@ -18,7 +18,7 @@
 - 根目录：`/`
 - 构建命令：`npm run verify`
 - 部署命令：`npx wrangler deploy`
-- Node.js：24（可在构建变量中设置 `NODE_VERSION=24`）
+- Node.js：24（构建变量 `NODE_VERSION=24`；仓库 `.node-version` 同时固定主版本）
 - 依赖安装：`npm ci`，使用提交的 `package-lock.json`
 
 `SECRET` 和 `BOOT` 继续保存在 Cloudflare 的运行时 Secrets 中；仓库和工作流不需要这些值，也不会自动轮换它们。现有自定义域名在 `wrangler.jsonc` 中保留。连接后的源码以 Git 仓库为准，避免在在线编辑器中单独修改导致下次部署覆盖。
