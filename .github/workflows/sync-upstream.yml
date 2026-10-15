@@ -3,6 +3,11 @@ on:
   schedule:
     - cron: '17 21 * * *' # Every day at 05:17 Asia/Shanghai (best effort).
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: Request a production build even when upstream is unchanged
+        type: boolean
+        default: false
 permissions:
   contents: write
 concurrency:
@@ -31,14 +36,22 @@ jobs:
           npm run check:bundle
       - name: Commit tested upstream changes
         shell: bash
+        env:
+          FORCE_BUILD: ${{ inputs.force_build || false }}
         run: |
-          git add -- telegram_webproxy.js README.md LICENSE .upstream-revision
-          if git diff --cached --quiet; then
-            echo 'No upstream changes.' >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- telegram_webproxy.js README.md LICENSE .upstream-revision
+          if git diff --cached --quiet; then
+            if [ "$FORCE_BUILD" = 'true' ]; then
+              git commit --allow-empty -m 'ci: request production build'
+              git push origin HEAD:main
+              echo 'No upstream changes. Pushed a verified empty commit to request a production build.' >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo 'No upstream changes.' >> "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
           revision=$(cat .upstream-revision)
           git commit -m "chore: sync upstream ${revision:0:12}"
           git push origin HEAD:main
