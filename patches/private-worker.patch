@@ -1,0 +1,139 @@
+diff --git a/telegram_webproxy.js b/telegram_webproxy.js
+index 862f8dd..8dca369 100644
+--- a/telegram_webproxy.js
++++ b/telegram_webproxy.js
+@@ -1,12 +1,21 @@
++/* Personal deployment based on annpardo/CF-Workers-TGProxy (GPL-3.0).
++   Changes: require access key for dashboard/statistics; remove third-party contact links and misleading labels. */
++function privateAccess(url, secret) {
++  const given = url.searchParams.get('access') || '';
++  if (given.length !== secret.length) return false;
++  let diff = 0;
++  for (let i = 0; i < secret.length; i++) diff |= given.charCodeAt(i) ^ secret.charCodeAt(i);
++  return diff === 0;
++}
+ const CFG = { dnPack: 32 * 1024, upPack: 20 * 1024, dnMs: 1 };
+ export default { fetch: (req, env) => route(req, env) };
+ const txt = new TextEncoder(), dec = new TextDecoder(), nil = new Uint8Array(0), badHead = new Set(['HEAD', 'POST', 'GET ', 'OPTI']);
+-const CRYPTO = globalThis.crypto, macKeys = new Map(), leases = new Map();
++const CRYPTO = crypto, macKeys = new Map(), leases = new Map();
+ const reply = (body = null, status = 404) => new Response(body, { status });
+ 
+ // ======================== 全局监控埋点统计 ========================
+ const STATS = {
+-  startTime: Date.now(),
++  startTime: 0,
+   totalSessions: 0,
+   activeConnections: 0,
+   totalTrafficBytes: 0,
+@@ -169,7 +178,7 @@ function mkDashboard(host, secret, botName = 'eoops_bot') {
+ <head>
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width, initial-scale=1">
+-<title>Telegram 官方代理服务中心</title>
++<title>私人 Telegram 代理</title>
+ <style>
+   * { box-sizing: border-box; margin: 0; padding: 0; }
+   body {
+@@ -276,13 +285,13 @@ function mkDashboard(host, secret, botName = 'eoops_bot') {
+ 
+ <div class="container">
+   <div class="header">
+-    <div class="title">Telegram 代理服务中心</div>
++    <div class="title">私人 Telegram 代理</div>
+     <div class="badge-success">● 服务就绪 (Online)</div>
+   </div>
+   
+   <div class="content">
+     <div class="card-section">
+-      <div class="section-label">1. 推荐方式：Telegram WEB 代理 (官方全新通道，抗封锁)</div>
++      <div class="section-label">1. 推荐方式：Telegram Web Proxy</div>
+       <div class="proxy-card">
+         <div class="proxy-url-text">${proxyUrl}</div>
+         <div class="proxy-details">
+@@ -307,11 +316,11 @@ function mkDashboard(host, secret, botName = 'eoops_bot') {
+     </div>
+ 
+     <div class="card-section">
+-      <div class="section-label">2. 节点负载与实时监控 (Prometheus 实时采集)</div>
++      <div class="section-label">2. 当前 Worker 实例统计</div>
+       <div class="metrics-grid">
+         <div class="metric-card">
+-          <div class="metric-title">当前在线人数</div>
+-          <div class="metric-value" id="val-online" style="color: #67c23a;">0 <span class="metric-unit">人</span></div>
++          <div class="metric-title">活跃连接数</div>
++          <div class="metric-value" id="val-online" style="color: #67c23a;">0 <span class="metric-unit">条</span></div>
+           <div class="metric-sub">实时并发连接</div>
+         </div>
+         <div class="metric-card">
+@@ -342,16 +351,7 @@ function mkDashboard(host, secret, botName = 'eoops_bot') {
+       </div>
+     </div>
+ 
+-    <div class="card-section" style="margin-bottom: 0;">
+-      <div class="section-label">3. 交流机器人</div>
+-      <div class="group-box">
+-        <div class="group-text">欢迎联系TG私聊机器人 <b>@${botName}</b>，获取实时节点状态、测速通知与最新专属配置！</div>
+-        <div class="btn-group" style="margin-top: 0;">
+-          <a href="https://t.me/${botName}" target="_blank" class="btn btn-success">立即联系TG机器人 (@${botName})</a>
+-          <button class="btn btn-default" onclick="copyText('https://t.me/${botName}', '群组链接已复制')">复制机器人链接</button>
+-        </div>
+-      </div>
+-    </div>
++
+   </div>
+ </div>
+ 
+@@ -377,7 +377,7 @@ function showToast(msg) {
+   setTimeout(function() { toast.classList.remove('show'); }, 2000);
+ }
+ function updateMetrics() {
+-  fetch('/api/stats')
++  fetch('/api/stats?access=${encodeURIComponent(secret)}')
+     .then(function(res) { return res.json(); })
+     .then(function(data) {
+       var onlineEl = document.getElementById('val-online');
+@@ -386,7 +386,7 @@ function updateMetrics() {
+       var uptimeEl = document.getElementById('val-uptime');
+       var machineBootEl = document.getElementById('val-machine-boot');
+       var machineUptimeEl = document.getElementById('val-machine-uptime');
+-      if (onlineEl) onlineEl.innerHTML = data.active_connections + ' <span class="metric-unit">人</span>';
++      if (onlineEl) onlineEl.innerHTML = data.active_connections + ' <span class="metric-unit">条</span>';
+       if (trafficEl) trafficEl.textContent = data.total_traffic;
+       if (sessEl) sessEl.innerHTML = data.total_sessions + ' <span class="metric-unit">次</span>';
+       if (uptimeEl) uptimeEl.textContent = data.uptime;
+@@ -403,11 +403,13 @@ setInterval(updateMetrics, 3000);
+ 
+ // ======================== 核心路由 ========================
+ const route = async (req, env) => {
++  if (!STATS.startTime) STATS.startTime = Date.now();
+   const url = new URL(req.url), { pathname: path, origin } = url, { method, headers } = req; let cfg;
+   try { cfg = mkCfg(env); } catch { return ['/', '/health', '/api/v1/session', '/api/v1/ws'].includes(path) ? reply(null, 500) : reply(); }
+ 
+   // 1. 新增：实时统计 API 接口
+   if (path === '/api/stats' && method === 'GET') {
++    if (!privateAccess(url, cfg.secret)) return reply(null, 404);
+     const uptimeStr = formatDuration(Date.now() - STATS.startTime);
+     const bootDate = new Date(STATS.startTime);
+     const bootStr = `${bootDate.getFullYear()}-${String(bootDate.getMonth()+1).padStart(2,'0')}-${String(bootDate.getDate()).padStart(2,'0')} ${String(bootDate.getHours()).padStart(2,'0')}:${String(bootDate.getMinutes()).padStart(2,'0')}`;
+@@ -449,13 +451,13 @@ const route = async (req, env) => {
+         },
+       });
+     }
+-    // 如果是普通浏览器直接访问根路径，返回高颜值导入与监控看板
++    if (!privateAccess(url, cfg.secret)) return new Response('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Maple Notes</title><body><h2>Maple Notes</h2><form><label>访问密钥 <input name="access" type="password" required autocomplete="off"></label><button>打开导入面板</button></form></body></html>', {headers:{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff'}});
+     if (method === 'HEAD') return new Response(null, { status: 200 });
+     const botName = env.TG_BOT || 'eoops_bot';
+     const dashboardHtml = mkDashboard(url.hostname, cfg.secret, botName);
+     return new Response(dashboardHtml, {
+       status: 200,
+-      headers: { 'Content-Type': 'text/html; charset=utf-8' },
++      headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff' },
+     });
+   }
+ 
+@@ -514,3 +516,4 @@ const route = async (req, env) => {
+   try { sess.attach(server); } catch { sess.close(); return reply(null, 409); }
+   return new Response(null, { status: 101, webSocket: client, headers: { 'Sec-WebSocket-Protocol': proto, 'Sec-WebSocket-Extensions': '', }, });
+ };
++
