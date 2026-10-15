@@ -35,6 +35,7 @@ jobs:
           npm run verify
           npm run check:bundle
       - name: Commit tested upstream changes
+        id: upstream
         shell: bash
         env:
           FORCE_BUILD: ${{ inputs.force_build || false }}
@@ -46,6 +47,7 @@ jobs:
             if [ "$FORCE_BUILD" = 'true' ]; then
               git commit --allow-empty -m 'ci: request production build'
               git push origin HEAD:main
+              echo 'deploy_required=true' >> "$GITHUB_OUTPUT"
               echo 'No upstream changes. Pushed a verified empty commit to request a production build.' >> "$GITHUB_STEP_SUMMARY"
             else
               echo 'No upstream changes.' >> "$GITHUB_STEP_SUMMARY"
@@ -55,4 +57,21 @@ jobs:
           revision=$(cat .upstream-revision)
           git commit -m "chore: sync upstream ${revision:0:12}"
           git push origin HEAD:main
+          echo 'deploy_required=true' >> "$GITHUB_OUTPUT"
           echo "Synced and verified upstream $revision. Cloudflare Builds will deploy this commit." >> "$GITHUB_STEP_SUMMARY"
+      - name: Request Cloudflare build through optional deploy hook
+        if: steps.upstream.outputs.deploy_required == 'true'
+        env:
+          CF_DEPLOY_HOOK: ${{ secrets.CF_DEPLOY_HOOK }}
+        shell: bash
+        run: |
+          if [ -z "$CF_DEPLOY_HOOK" ]; then
+            echo 'No deploy hook configured; relying on the Git integration.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          case "$CF_DEPLOY_HOOK" in
+            https://api.cloudflare.com/*) ;;
+            *) echo 'Deploy hook must use the official Cloudflare API host.' >&2; exit 1 ;;
+          esac
+          curl --proto '=https' --fail --silent --show-error --max-time 60 --retry 2 --request POST "$CF_DEPLOY_HOOK"
+          echo 'Requested Cloudflare build through the deploy hook.' >> "$GITHUB_STEP_SUMMARY"
